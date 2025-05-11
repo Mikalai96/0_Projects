@@ -104,6 +104,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -127,7 +128,19 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="..\..\1_Oldproj\correspondence.cpp" />
+    <ClCompile Include="..\..\1_Oldproj\file_manager.cpp" />
+    <ClCompile Include="..\..\1_Oldproj\FinalProject.cpp" />
+    <ClCompile Include="..\..\1_Oldproj\journal.cpp" />
+    <ClCompile Include="..\..\1_Oldproj\pdfManager.cpp" />
     <ClCompile Include="ConsoleApplication1.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\1_Oldproj\config_manager.h" />
+    <ClInclude Include="..\..\1_Oldproj\correspondence.h" />
+    <ClInclude Include="..\..\1_Oldproj\file_manager.h" />
+    <ClInclude Include="..\..\1_Oldproj\journal.h" />
+    <ClInclude Include="..\..\1_Oldproj\pdfManager.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

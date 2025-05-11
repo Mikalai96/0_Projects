@@ -399,3 +399,115 @@ FodyWeavers.xsd
 
 # JetBrains Rider
 *.sln.iml
+
+# Файлы байт-кода и кэш Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Виртуальные окружения
+# Исключите папку с вашим виртуальным окружением.
+# Распространенные имена: venv, env, .venv, .env, .Python
+venv/
+env/
+.venv/
+.env/
+.Python/
+buildout-cache/
+
+# Дистрибутивы и файлы сборки
+dist/
+build/
+develop-eggs/
+eggs/
+sdist/
+parts/
+wheels/
+*.egg-info/
+*.egg
+*.whl
+*.tar.gz
+*.zip
+# PyInstaller
+# Исключение временных файлов и выходных данных PyInstaller
+# *.manifest # Если создаются
+# *.spec    # Можно оставить, если хотите версионировать спецификацию сборки,
+#             # но часто генерируется заново. Решите по вашему рабочему процессу.
+
+# Файлы IDE и редакторов
+# Visual Studio Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+# PyCharm
+.idea/
+# Sublime Text
+*.sublime-workspace
+*.sublime-project
+# Vim
+*.sw[pon]
+# Eclipse/PyDev
+.project
+.pydevproject
+.settings/
+# Netbeans
+nbproject/
+
+# Файлы операционной системы
+# macOS
+.DS_Store
+._*
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+# Linux
+*~
+
+# Лог-файлы
+*.log
+logs/
+
+# Тестирование и покрытие кода
+.tox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.pytest_cache/
+nosetests.xml
+# Можно добавить другие файлы отчетов о тестировании
+
+# Конфигурационные файлы среды (dotenv)
+# ВАЖНО: Никогда не добавляйте файлы с секретами (.env с реальными паролями) в репозиторий!
+# Добавьте сам .env в .gitignore, но оставьте .env.example или .env.template
+.env
+*.env.*
+!*.env.example
+!*.env.template
+
+# Файлы баз данных (если используются локально для разработки)
+*.sqlite3
+*.db
+local_settings.py
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Специфичные для вашего приложения (на основе вашего кода):
+# Папка с сохраненными PDF и вложениями
+saved_emails_pdf/
+# Временные файлы, если они могут оставаться (хотя ваш скрипт пытается их удалять)
+# *.pdf.tmp_main_report.pdf
+
+# Заметки:
+# - `DejaVuSans.ttf`: Если этот файл является частью вашего исходного кода и должен
+#   быть в репозитории, чтобы другие могли запустить скрипт из исходников,
+#   то его НЕ нужно добавлять в .gitignore. Если он скачивается или управляется
+#   иначе, то можно добавить. Судя по вашей функции `resource_path`, он, скорее всего,
+#   должен быть в репозитории.
+# - `*.spec` (для PyInstaller): Некоторые предпочитают версионировать .spec файл,
+#   особенно если он кастомизирован. Если вы каждый раз генерируете его заново
+#   простой командой, его можно добавить в .gitignore.
