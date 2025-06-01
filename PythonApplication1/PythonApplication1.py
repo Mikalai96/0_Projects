@@ -16,16 +16,19 @@ import re
 from io import BytesIO
 import traceback
 import sys
+import platform 
+import subprocess 
+import time 
+import shutil # Добавлен для удаления непустых папок
 
 def resource_path(relative_path):
     """ Получить абсолютный путь к ресурсу, работает для разработки и для PyInstaller """
     try:
-        # PyInstaller создает временную папку и сохраняет путь в _MEIPASS
         base_path = sys._MEIPASS
     except Exception:
-        base_path = os.path.abspath(".") # Для режима разработки
-
+        base_path = os.path.abspath(".") 
     return os.path.join(base_path, relative_path)
+
 # Для слияния PDF
 try:
     from pypdf import PdfWriter
@@ -38,7 +41,7 @@ except ImportError:
 
 # Глобальная проверка доступности WIN32COM
 WIN32COM_AVAILABLE = False
-if os.name == 'nt':
+if os.name == 'nt': 
     try:
         import win32com.client
         WIN32COM_AVAILABLE = True
@@ -48,11 +51,157 @@ if os.name == 'nt':
 else:
     print("INFO: Скрипт запущен не на Windows. Конвертация файлов MS Office в PDF будет недоступна.")
 
-DEJAVU_SANS_FONT_PATH = "DejaVuSans.ttf"
+DEJAVU_SANS_FONT_PATH = resource_path("DejaVuSans.ttf") 
 PDF_OUTPUT_DIRECTORY = "saved_emails_pdf"
-ATTACHMENTS_SUBDIRECTORY_NAME = "attachments" # Базовая папка для всех вложений
-CONVERTIBLE_EXTENSIONS = ['.doc','.docx','.rtf','.odt','.txt', '.xls','.xlsx','.ods', '.ppt','.pptx','.odp']
-# JOURNAL_NUMBER_FILE - удалена
+ATTACHMENTS_SUBDIRECTORY_NAME = "attachments"
+PDF_REGISTERED_SUBDIR_NAME = "registered_emails"
+PDF_DOWNLOADED_SUBDIR_NAME = "downloaded_emails"
+
+CONVERTIBLE_EXTENSIONS = ['.doc','.docx','.rtf','.odt','.txt', '.xls','.xlsx','.ods', '.ppt','.pptx','.odp','.xlsm']
+
+# --- Функция для открытия файла для просмотра ---
+def open_file_for_review(filepath):
+    """
+    Пытается открыть файл системным приложением по умолчанию.
+    """
+    try:
+        abs_filepath = os.path.abspath(filepath)
+        if not os.path.exists(abs_filepath):
+            print(f"ERROR: Файл для просмотра не найден: {abs_filepath}")
+            return False 
+
+        print(f"INFO: Попытка открыть файл для ознакомления: {abs_filepath}")
+        if platform.system() == 'Darwin':       # macOS
+            subprocess.call(('open', abs_filepath))
+        elif platform.system() == 'Windows':    # Windows
+            os.startfile(abs_filepath)
+        else:                                   # linux variants
+            subprocess.call(('xdg-open', abs_filepath))
+        
+        input("INFO: Файл открыт для ознакомления. ПОЖАЛУЙСТА, ЗАКРОЙТЕ ОКНО ПРОСМОТРА PDF, затем нажмите Enter для продолжения...")
+        time.sleep(1) 
+        return True 
+
+    except Exception as e:
+        print(f"WARNING: Не удалось автоматически открыть файл '{abs_filepath}'. Пожалуйста, откройте его вручную. Ошибка: {e}")
+        input("INFO: Нажмите Enter, чтобы продолжить...")
+        return False 
+
+# --- Функция для принятия решения пользователем по PDF ---
+def handle_user_decision_for_pdf(path_for_review, journal_number, date_str_for_filename, subject_for_filename, attachments_folder_path=None):
+    """
+    Открывает PDF для просмотра и запрашивает у пользователя решение о сохранении.
+    attachments_folder_path: путь к папке с вложениями этого письма.
+    """
+    if not open_file_for_review(path_for_review):
+        print(f"ERROR: Не удалось открыть файл {path_for_review} для ознакомления. Операция прервана.")
+        return "ERROR", path_for_review 
+
+    registered_dir = os.path.join(PDF_OUTPUT_DIRECTORY, PDF_REGISTERED_SUBDIR_NAME)
+    downloaded_dir = os.path.join(PDF_OUTPUT_DIRECTORY, PDF_DOWNLOADED_SUBDIR_NAME)
+
+    while True:
+        print(f"\nДействия для документа (на основе {os.path.basename(path_for_review)}):")
+        print(f"  1. Сохранить с присвоением входящего номера (вх.№ {journal_number}) (в папку '{PDF_REGISTERED_SUBDIR_NAME}')")
+        print(f"  2. Скачать без присвоения номера (в папку '{PDF_DOWNLOADED_SUBDIR_NAME}')")
+        print(f"  3. Пропустить/Удалить этот документ (включая его вложения)")
+        choice = input("Ваш выбор (1, 2 или 3): ").strip()
+
+        if choice == '1':
+            try:
+                if not os.path.exists(registered_dir):
+                    os.makedirs(registered_dir)
+                    print(f"INFO: Создана папка для зарегистрированных файлов: {registered_dir}")
+            except OSError as e:
+                print(f"ERROR: Не удалось создать папку '{registered_dir}': {e}. Файл будет сохранен в '{PDF_OUTPUT_DIRECTORY}'.")
+                final_save_path_dir = PDF_OUTPUT_DIRECTORY
+            else:
+                final_save_path_dir = registered_dir
+
+            final_filename = f"вх.№ {journal_number} от {date_str_for_filename}.pdf"
+            final_save_path = os.path.join(final_save_path_dir, final_filename)
+            
+            try:
+                if os.path.exists(final_save_path) and os.path.abspath(final_save_path) != os.path.abspath(path_for_review):
+                    print(f"WARNING: Файл {final_save_path} уже существует. Будет перезаписан.")
+                    os.remove(final_save_path) 
+                
+                if os.path.abspath(final_save_path) != os.path.abspath(path_for_review):
+                     os.rename(path_for_review, final_save_path)
+                else: 
+                    print(f"INFO: Файл уже имеет имя {final_save_path}.")
+
+                print(f"INFO: Файл сохранен как: {final_save_path}")
+                return "SAVED", final_save_path
+            except PermissionError as e_perm:
+                print(f"ERROR: Ошибка доступа к файлу '{final_save_path}'. ВЕРОЯТНО, ФАЙЛ ВСЕ ЕЩЕ ОТКРЫТ В ПРОГРАММЕ ПРОСМОТРА PDF. Пожалуйста, ЗАКРОЙТЕ программу просмотра PDF и попробуйте снова. ({e_perm})")
+            except Exception as e:
+                print(f"ERROR: Не удалось сохранить файл как {final_save_path}: {e}")
+                print(f"INFO: Исходный файл для ознакомления остался здесь: {path_for_review}")
+                return "ERROR", path_for_review 
+
+        elif choice == '2':
+            try:
+                if not os.path.exists(downloaded_dir):
+                    os.makedirs(downloaded_dir)
+                    print(f"INFO: Создана папка для скачанных файлов: {downloaded_dir}")
+            except OSError as e:
+                print(f"ERROR: Не удалось создать папку '{downloaded_dir}': {e}. Файл будет сохранен в '{PDF_OUTPUT_DIRECTORY}'.")
+                final_save_path_dir = PDF_OUTPUT_DIRECTORY
+            else:
+                final_save_path_dir = downloaded_dir
+                
+            sane_subject = sanitize_filename(subject_for_filename[:50]) if subject_for_filename else "без_темы"
+            download_filename = f"скачано_{date_str_for_filename}_{sane_subject}.pdf"
+            download_save_path = os.path.join(final_save_path_dir, download_filename)
+            try:
+                if os.path.exists(download_save_path) and os.path.abspath(download_save_path) != os.path.abspath(path_for_review):
+                    print(f"WARNING: Файл {download_save_path} уже существует. Будет перезаписан.")
+                    os.remove(download_save_path)
+
+                if os.path.abspath(download_save_path) != os.path.abspath(path_for_review):
+                    os.rename(path_for_review, download_save_path)
+                else:
+                     print(f"INFO: Файл уже имеет имя {download_save_path}.")
+                print(f"INFO: Файл скачан как: {download_save_path}")
+                return "DOWNLOADED", download_save_path
+            except PermissionError as e_perm:
+                print(f"ERROR: Ошибка доступа к файлу '{download_save_path}'. ВЕРОЯТНО, ФАЙЛ ВСЕ ЕЩЕ ОТКРЫТ В ПРОГРАММЕ ПРОСМОТРА PDF. Пожалуйста, ЗАКРОЙТЕ программу просмотра PDF и попробуйте снова. ({e_perm})")
+            except Exception as e:
+                print(f"ERROR: Не удалось скачать файл как {download_save_path}: {e}")
+                print(f"INFO: Исходный файл для ознакомления остался здесь: {path_for_review}")
+                return "ERROR", path_for_review
+
+        elif choice == '3':
+            pdf_deleted = False
+            try:
+                os.remove(path_for_review)
+                print(f"INFO: Временный PDF файл {path_for_review} удален.")
+                pdf_deleted = True
+            except PermissionError as e_perm:
+                print(f"ERROR: Ошибка доступа при удалении PDF файла '{path_for_review}'. ВЕРОЯТНО, ФАЙЛ ВСЕ ЕЩЕ ОТКРЫТ В ПРОГРАММЕ ПРОСМОТРА PDF. Пожалуйста, ЗАКРОЙТЕ программу просмотра PDF и попробуйте снова. ({e_perm})")
+                # Остаемся в цикле, чтобы пользователь мог попробовать еще раз
+                continue 
+            except Exception as e:
+                print(f"ERROR: Не удалось удалить PDF файл {path_for_review}: {e}")
+                # Если PDF не удален, нет смысла удалять вложения, возвращаем ошибку
+                return "ERROR", path_for_review 
+            
+            if pdf_deleted:
+                if attachments_folder_path and os.path.exists(attachments_folder_path):
+                    try:
+                        shutil.rmtree(attachments_folder_path)
+                        print(f"INFO: Папка вложений {attachments_folder_path} удалена.")
+                    except Exception as e_rmtree:
+                        print(f"WARNING: Не удалось удалить папку вложений {attachments_folder_path}: {e_rmtree}")
+                        # Продолжаем, так как основной PDF удален, но предупреждаем о папке
+                elif attachments_folder_path:
+                     print(f"INFO: Папка вложений {attachments_folder_path} не найдена или уже удалена.")
+                else:
+                    print(f"INFO: Нет информации о папке вложений для удаления или она не была создана.")
+                return "SKIPPED", None
+        else:
+            print("ERROR: Неверный выбор. Пожалуйста, введите 1, 2 или 3.")
 
 # --- Функция для запроса начального номера журнала ---
 def prompt_for_starting_journal_number():
@@ -85,7 +234,7 @@ def merge_pdfs(list_of_pdf_paths, output_merged_pdf_path):
                     merger.append(pdf_path)
                     print(f"    DEBUG: Добавлен '{os.path.basename(pdf_path)}' для слияния.")
                     merged_something = True
-                except Exception as e_append: # pypdf может выбросить исключение для поврежденных PDF
+                except Exception as e_append: 
                     print(f"    WARNING: Не удалось добавить PDF '{os.path.basename(pdf_path)}' для слияния: {e_append}")
             else:
                 print(f"    WARNING: PDF-файл для объединения не найден: {pdf_path}")
@@ -93,7 +242,7 @@ def merge_pdfs(list_of_pdf_paths, output_merged_pdf_path):
         if not merged_something:
             print("    WARNING: Нет PDF-файлов для фактического слияния.")
             merger.close()
-            return False 
+            return False
 
         with open(output_merged_pdf_path, "wb") as f_out:
             merger.write(f_out)
@@ -122,7 +271,6 @@ if WIN32COM_AVAILABLE:
         finally:
             if doc: doc.Close(False)
             if word: word.Quit()
-            del doc; del word # Можно оставить, но не обязательно
 
     def convert_spreadsheet_to_pdf_msexcel(input_path, output_path):
         excel = None; workbook = None
@@ -138,7 +286,6 @@ if WIN32COM_AVAILABLE:
         finally:
             if workbook: workbook.Close(False)
             if excel: excel.Quit()
-            del workbook; del excel
 
     def convert_presentation_to_pdf_msppt(input_path, output_path):
         powerpoint = None; presentation = None
@@ -154,7 +301,6 @@ if WIN32COM_AVAILABLE:
         finally:
             if presentation: presentation.Close()
             if powerpoint: powerpoint.Quit()
-            del presentation; del powerpoint
 
 def sanitize_filename(filename):
     if not filename: return "untitled_attachment"
@@ -168,12 +314,21 @@ def check_mailru_inbox():
     if not all([mail_host, username, password]): print("Ошибка: Не все переменные окружения определены."); return
     
     mail = None
-    current_journal_num = -1 # Инициализация
+    current_journal_num = -1 
 
     try:
         print(f"Подключение к {mail_host}..."); mail = imaplib.IMAP4_SSL(mail_host, 993)
         print("Вход в аккаунт..."); mail.login(username, password)
         mail.select('inbox'); print("Успешно подключено к 'Входящие'.")
+        
+        if not os.path.exists(PDF_OUTPUT_DIRECTORY):
+            try:
+                os.makedirs(PDF_OUTPUT_DIRECTORY)
+                print(f"INFO: Папка '{PDF_OUTPUT_DIRECTORY}' создана.")
+            except OSError as e:
+                print(f"CRITICAL ERROR: Не удалось создать основную папку вывода '{PDF_OUTPUT_DIRECTORY}': {e}. Работа прервана.")
+                return
+
         print("Поиск непрочитанных писем..."); status, data = mail.search(None, 'UNSEEN')
         if status != 'OK': print(f"Ошибка поиска писем: {data[0].decode() if data and data[0] else 'Нет данных'}"); return
         
@@ -181,23 +336,23 @@ def check_mailru_inbox():
         print(f"У вас {num_unread} непрочитанных писем.")
 
         if num_unread > 0:
-            if not os.path.exists(PDF_OUTPUT_DIRECTORY):
-                try: os.makedirs(PDF_OUTPUT_DIRECTORY); print(f"Папка '{PDF_OUTPUT_DIRECTORY}' создана.")
-                except OSError as e: print(f"Ошибка создания папки '{PDF_OUTPUT_DIRECTORY}': {e}"); return
-            
-            current_journal_num = prompt_for_starting_journal_number() # Запрашиваем номер здесь, если есть письма
+            current_journal_num = prompt_for_starting_journal_number() 
 
             for i, email_id_bytes in enumerate(email_ids_bytes):
                 email_id_str = email_id_bytes.decode()
-                print(f"\nОткрываем письмо #{i + 1} из {num_unread} (ID: {email_id_str}), будет присвоен вх.№ {current_journal_num}:")
+                print(f"\nОткрываем письмо #{i + 1} из {num_unread} (ID: {email_id_str}), предполагаемый вх.№ {current_journal_num}:")
                 
-                if open_email(mail, email_id_str, current_journal_num):
+                processing_result, _ = open_email(mail, email_id_str, current_journal_num) 
+                
+                if processing_result == "SAVED":
                     print(f"INFO: Письмо ID {email_id_str} успешно обработано и сохранено с вх.№ {current_journal_num}.")
-                    current_journal_num += 1 # Инкрементируем для следующего письма в этой сессии
-                else:
+                    current_journal_num += 1 
+                elif processing_result == "DOWNLOADED":
+                    print(f"INFO: Письмо ID {email_id_str} скачано без присвоения номера журнала.")
+                elif processing_result == "SKIPPED":
+                    print(f"INFO: Письмо ID {email_id_str} (предполагаемый вх.№ {current_journal_num}) пропущено пользователем (PDF и вложения удалены).")
+                else: 
                     print(f"ERROR: Ошибка обработки письма ID {email_id_str} (предполагаемый вх.№ {current_journal_num}). Этот номер будет использован для следующего письма (если оно есть и будет обработано успешно).")
-                    # Номер не инкрементируется, если письмо не удалось обработать,
-                    # чтобы не было пропусков в нумерации при последующей успешной обработке.
         else:
             print("У вас нет непрочитанных писем.")
             
@@ -210,37 +365,34 @@ def check_mailru_inbox():
             except Exception as e_logout: print(f"Ошибка при выходе: {e_logout}")
         print("Завершение работы с почтовым сервером.")
 
-def open_email(mail_obj, email_id, journal_number): 
+def open_email(mail_obj, email_id, journal_number):
     pdf_attachments_to_merge = []
-    main_report_temp_path = None 
-    parsed_date_for_filename = None 
-
+    email_att_specific_path = None # Инициализируем путь к папке вложений
+    
     try:
         print(f"  DEBUG: Начало open_email для ID {email_id}, вх.№ {journal_number}")
         status, data = mail_obj.fetch(email_id, '(RFC822)')
-        if status != 'OK': 
-            print(f"  ERROR: Ошибка получения письма ID {email_id}"); 
-            return False
+        if status != 'OK':
+            print(f"  ERROR: Ошибка получения письма ID {email_id}");
+            return "ERROR", None 
         msg = email.message_from_bytes(data[0][1])
 
-        date_header = msg.get('Date'); formatted_date_display = "Отсутствует" 
-        filename_date_str_for_display = "ДАТА_НЕ_ОПРЕДЕЛЕНА" 
-        filename_date_str_for_path = "ДАТА_НЕ_ОПРЕДЕЛЕНА"    
-
+        date_header = msg.get('Date'); formatted_date_display = "Отсутствует"
         if date_header:
-            try: 
-                parsed_date_for_filename = email.utils.parsedate_to_datetime(date_header)
-                if parsed_date_for_filename:
-                    formatted_date_display = parsed_date_for_filename.strftime("%Y-%m-%d %H:%M:%S")
-                    filename_date_str_for_display = parsed_date_for_filename.strftime("%d.%m.%Y")
-                    filename_date_str_for_path = parsed_date_for_filename.strftime("%d-%m-%Y") 
+            try:
+                email_actual_date = email.utils.parsedate_to_datetime(date_header)
+                if email_actual_date:
+                    formatted_date_display = email_actual_date.strftime("%Y-%m-%d %H:%M:%S")
                 else:
-                    formatted_date_display = f"Не удалось распознать: {date_header}"
-            except Exception as e_date: 
+                    formatted_date_display = f"Не удалось распознать дату письма: {date_header}"
+            except Exception as e_date:
                 formatted_date_display = f"Ошибка даты: {e_date}"
         print(f"  Дата письма: {formatted_date_display}")
 
-        final_pdf_filename = f"вх.№ {journal_number} от {filename_date_str_for_display}.pdf"
+        current_datetime_for_filename = datetime.datetime.now()
+        filename_date_str_for_display = current_datetime_for_filename.strftime("%d.%m.%Y")
+        filename_date_str_for_path = current_datetime_for_filename.strftime("%d-%m-%Y")
+        
         raw_email_att_dir_name = f"вх__{journal_number}_от_{filename_date_str_for_path}_attachments"
         
         from_header_raw = msg.get('From'); sender_info = "Отправитель отсутствует"
@@ -297,25 +449,23 @@ def open_email(mail_obj, email_id, journal_number):
                     except Exception as e_bs_s: body = f"Ошибка BeautifulSoup (тело HTML, не многочастное): {e_bs_s}"
                 else: body = f"Содержимое письма имеет тип {ctype}, не является стандартным текстом."
         print(f"  Содержание (первые 200 симв.): {body[:200].replace(chr(10), ' ')}...")
+        
+        timestamp_str = datetime.datetime.now().strftime('%Y%m%d%H%M%S%f') 
+        temp_main_report_filename = f"temp_main_report_j{journal_number}_{timestamp_str}.pdf"
+        temp_main_report_path = os.path.join(PDF_OUTPUT_DIRECTORY, temp_main_report_filename)
 
-        os.makedirs(PDF_OUTPUT_DIRECTORY, exist_ok=True)
-        final_pdf_full_path = os.path.join(PDF_OUTPUT_DIRECTORY, final_pdf_filename)
-        reportlab_output_path = final_pdf_full_path 
-
-        c = canvas.Canvas(reportlab_output_path, pagesize=A4)
+        c = canvas.Canvas(temp_main_report_path, pagesize=A4)
         width, height = A4; margin = 20*mm; current_y = height-margin; content_width = width-2*margin
         font_to_use = 'Helvetica'
-        # DEJAVU_SANS_FONT_PATH = "DejaVuSans.ttf" # Имя файла шрифта
-        font_path_to_register = resource_path(DEJAVU_SANS_FONT_PATH) # Используем resource_path
-
-        if os.path.exists(font_path_to_register): # Проверяем путь, полученный от resource_path
+        
+        if os.path.exists(DEJAVU_SANS_FONT_PATH):
             try: 
-                pdfmetrics.registerFont(TTFont('DejaVuSans', font_path_to_register)) # Регистрируем шрифт по этому пути
+                pdfmetrics.registerFont(TTFont('DejaVuSans', DEJAVU_SANS_FONT_PATH))
                 font_to_use = 'DejaVuSans'
-            except Exception as e_font: # Добавил переменную для исключения, чтобы можно было вывести
-                print(f"INFO: Ошибка регистрации шрифта '{font_path_to_register}': {e_font}. Используется Helvetica.")
+            except Exception as e_font:
+                print(f"INFO: Ошибка регистрации шрифта '{DEJAVU_SANS_FONT_PATH}': {e_font}. Используется Helvetica.")
         else: 
-            print(f"INFO: Шрифт '{font_path_to_register}' не найден. Используется Helvetica.")
+            print(f"INFO: Шрифт '{DEJAVU_SANS_FONT_PATH}' не найден. Используется Helvetica.")
         styles = getSampleStyleSheet()
         styleN = styles['Normal']; styleN.fontName=font_to_use; styleN.fontSize=10; styleN.leading=12
         styleH = styles['Heading3']; styleH.fontName=font_to_use; styleH.fontSize=11; styleH.leading=13; styleH.spaceBefore=6; styleH.spaceAfter=2
@@ -339,6 +489,7 @@ def open_email(mail_obj, email_id, journal_number):
         attachments_summary = []; num_attachments_found = 0
         email_att_path_base = os.path.join(PDF_OUTPUT_DIRECTORY, ATTACHMENTS_SUBDIRECTORY_NAME)
         sanitized_email_att_subdir_name = sanitize_filename(raw_email_att_dir_name)
+        # Определяем путь к папке вложений для этого письма
         email_att_specific_path = os.path.join(email_att_path_base, sanitized_email_att_subdir_name)
 
         if not os.path.exists(email_att_path_base):
@@ -346,12 +497,34 @@ def open_email(mail_obj, email_id, journal_number):
             except OSError as e_base_dir: print(f"    ERROR: Ошибка создания базовой папки вложений '{email_att_path_base}': {e_base_dir}")
         
         specific_email_folder_created_successfully = False
-        if not os.path.exists(email_att_specific_path):
-            try: os.makedirs(email_att_specific_path); specific_email_folder_created_successfully = True
-            except OSError as e_mkdir: print(f"      ERROR: Не удалось создать папку '{email_att_specific_path}': {e_mkdir}.")
-        else: specific_email_folder_created_successfully = True
-
+        # Создаем папку вложений, если есть что сохранять (будет проверено ниже)
+        # Флаг specific_email_folder_created_successfully будет установлен, если папка создана или уже существует
+        
         if msg.is_multipart():
+            has_attachments_to_save_to_disk = False
+            for part_check in msg.walk(): # Предварительная проверка, есть ли вообще вложения для сохранения на диск
+                filename_header_check = part_check.get_filename()
+                cdisp_check = str(part_check.get("Content-Disposition"))
+                if filename_header_check or "attachment" in cdisp_check.lower():
+                    att_content_type_lower_check = part_check.get_content_type().lower()
+                    if not (att_content_type_lower_check.startswith("image/") or \
+                            att_content_type_lower_check == "text/plain" or \
+                            att_content_type_lower_check == "text/html"):
+                        has_attachments_to_save_to_disk = True
+                        break
+            
+            if has_attachments_to_save_to_disk: # Создаем папку только если есть что в нее класть
+                if not os.path.exists(email_att_specific_path):
+                    try: 
+                        os.makedirs(email_att_specific_path)
+                        specific_email_folder_created_successfully = True
+                        print(f"    INFO: Создана папка для вложений письма: {email_att_specific_path}")
+                    except OSError as e_mkdir: 
+                        print(f"      ERROR: Не удалось создать папку '{email_att_specific_path}': {e_mkdir}.")
+                        # specific_email_folder_created_successfully остается False
+                else: 
+                    specific_email_folder_created_successfully = True # Папка уже существует
+
             print(f"    DEBUG: Начало обработки вложений (всего частей в письме: {len(list(msg.walk()))}).")
             for part_counter, part in enumerate(msg.walk()):
                 filename_header = part.get_filename()
@@ -403,17 +576,17 @@ def open_email(mail_obj, email_id, journal_number):
                         att_info_line += " - HTML (как текст) добавлен в PDF."
                         print(f"      INFO: HTML из '{decoded_fn}' (как текст) добавлен в PDF.")
                     else: 
-                        if not specific_email_folder_created_successfully:
-                            att_info_line += " - не обработано (ошибка создания папки)."
-                            print(f"      WARNING: Пропуск '{decoded_fn}' из-за ошибки папки.")
-                            current_y = add_paragraph_pdf(f"<i>Файл '{decoded_fn}' не обработан (ошибка папки).</i>", styleN, current_y)
+                        if not specific_email_folder_created_successfully: # Проверяем, была ли папка успешно создана/доступна
+                            att_info_line += " - не обработано (ошибка создания папки вложений письма)."
+                            print(f"      WARNING: Пропуск сохранения файла '{decoded_fn}' из-за ошибки папки вложений письма.")
+                            current_y = add_paragraph_pdf(f"<i>Файл '{decoded_fn}' не сохранен на диск (ошибка папки).</i>", styleN, current_y)
                         else:
                             orig_fname_with_prefix = f"{part_counter}_original_{sanitized_fn_for_saving}"
                             orig_path_abs = os.path.abspath(os.path.join(email_att_specific_path, orig_fname_with_prefix))
                             saved_original_successfully = False
                             try:
                                 with open(orig_path_abs, "wb") as f_a: f_a.write(attachment_data)
-                                print(f"      INFO: Оригинал '{decoded_fn}' сохранен как '{orig_fname_with_prefix}'")
+                                print(f"      INFO: Оригинал '{decoded_fn}' сохранен как '{orig_fname_with_prefix}' в '{email_att_specific_path}'")
                                 saved_original_successfully = True
                             except Exception as e_save_o:
                                 print(f"      ERROR: Не удалось сохранить оригинал '{decoded_fn}': {e_save_o}")
@@ -429,6 +602,9 @@ def open_email(mail_obj, email_id, journal_number):
                                     final_pdf_name_att = f"{part_counter}_{sanitized_fn_for_saving}" 
                                     final_pdf_path_abs_att = os.path.abspath(os.path.join(email_att_specific_path, final_pdf_name_att))
                                     try:
+                                        # Если файл уже существует и это не тот же самый файл, удаляем старый
+                                        if os.path.exists(final_pdf_path_abs_att) and final_pdf_path_abs_att != orig_path_abs:
+                                            os.remove(final_pdf_path_abs_att)
                                         os.rename(orig_path_abs, final_pdf_path_abs_att)
                                         path_to_potential_pdf_attachment = final_pdf_path_abs_att
                                         print(f"      INFO: PDF-вложение '{decoded_fn}' сохранено как '{final_pdf_name_att}'.")
@@ -445,7 +621,7 @@ def open_email(mail_obj, email_id, journal_number):
                                     conv_pdf_path_abs = os.path.abspath(os.path.join(email_att_specific_path, conv_pdf_name))
                                     com_func = None
                                     if file_ext in ['.doc','.docx','.rtf','.odt','.txt']: com_func = convert_document_to_pdf_msword
-                                    elif file_ext in ['.xls','.xlsx','.ods']: com_func = convert_spreadsheet_to_pdf_msexcel
+                                    elif file_ext in ['.xls','.xlsx','.ods','.xlsm']: com_func = convert_spreadsheet_to_pdf_msexcel
                                     elif file_ext in ['.ppt','.pptx','.odp']: com_func = convert_presentation_to_pdf_msppt
 
                                     if com_func and com_func(orig_path_abs, conv_pdf_path_abs):
@@ -482,53 +658,80 @@ def open_email(mail_obj, email_id, journal_number):
         else: current_y = add_paragraph_pdf("Вложения не найдены.", styleN, current_y)
 
         c.save() 
-        print(f"INFO: Основной PDF отчет ({os.path.basename(reportlab_output_path)}) сохранен.")
+        print(f"INFO: Временный основной PDF отчет ({temp_main_report_filename}) сохранен.")
+
+        path_for_review = temp_main_report_path
+        temp_merged_path_for_cleanup = None 
 
         if PYPDF_AVAILABLE and pdf_attachments_to_merge:
-            print(f"    DEBUG: Начало слияния PDF. Основной отчет: {reportlab_output_path}. Вложения для слияния: {len(pdf_attachments_to_merge)}")
-            main_report_temp_path = reportlab_output_path + ".tmp_main_report.pdf" 
-            try:
-                os.rename(reportlab_output_path, main_report_temp_path) 
-                print(f"      DEBUG: Основной отчет временно переименован в: {main_report_temp_path}")
-                all_pdfs_to_combine = [main_report_temp_path] + pdf_attachments_to_merge
-                
-                if merge_pdfs(all_pdfs_to_combine, final_pdf_full_path): 
-                    print(f"    INFO: Все PDF успешно объединены в: {final_pdf_full_path}")
-                    try:
-                        os.remove(main_report_temp_path)
-                        print(f"      DEBUG: Временный основной отчет '{main_report_temp_path}' удален.")
-                    except Exception as e_del_tmp:
-                        print(f"      WARNING: Не удалось удалить временный основной отчет '{main_report_temp_path}': {e_del_tmp}")
-                else: 
-                    print(f"    ERROR: Ошибка при слиянии PDF. Восстанавливаем основной отчет из временного файла.")
-                    try: 
-                        os.rename(main_report_temp_path, final_pdf_full_path) 
-                        print(f"      INFO: Основной отчет восстановлен как '{final_pdf_full_path}'. PDF вложения не были объединены.")
-                    except Exception as e_rename_back:
-                        print(f"      CRITICAL ERROR: Не удалось восстановить основной отчет из '{main_report_temp_path}' в '{final_pdf_full_path}': {e_rename_back}")
-                        print(f"                      Основной отчет может быть доступен как: {main_report_temp_path}")
-                        return False 
-            except Exception as e_rename_main:
-                print(f"    ERROR: Не удалось переименовать основной отчет для слияния: {e_rename_main}")
-                print(f"             Слияние PDF не будет выполнено. Основной отчет сохранен как: {reportlab_output_path}")
+            print(f"    DEBUG: Начало слияния PDF. Временный основной отчет: {temp_main_report_path}. Вложения для слияния: {len(pdf_attachments_to_merge)}")
+            
+            timestamp_str_merge = datetime.datetime.now().strftime('%Y%m%d%H%M%S%f')
+            temp_merged_filename = f"temp_merged_report_j{journal_number}_{timestamp_str_merge}.pdf"
+            temp_merged_path = os.path.join(PDF_OUTPUT_DIRECTORY, temp_merged_filename)
+            temp_merged_path_for_cleanup = temp_merged_path 
+            
+            all_pdfs_to_combine = [temp_main_report_path] + pdf_attachments_to_merge
+            
+            if merge_pdfs(all_pdfs_to_combine, temp_merged_path):
+                print(f"    INFO: Временный основной отчет и PDF-вложения успешно объединены в: {temp_merged_filename}")
+                path_for_review = temp_merged_path 
+                try:
+                    os.remove(temp_main_report_path) 
+                    print(f"    DEBUG: Удален первоначальный временный отчет '{temp_main_report_filename}', так как он слит.")
+                except Exception as e_del_tmp_main:
+                    print(f"    WARNING: Не удалось удалить первоначальный временный отчет '{temp_main_report_filename}' после слияния: {e_del_tmp_main}")
+            else:
+                print(f"    ERROR: Ошибка при слиянии PDF. Пользователю будет предложен только основной отчет для ознакомления.")
+                temp_merged_path_for_cleanup = None 
         elif not pdf_attachments_to_merge:
-            print(f"INFO: PDF вложений для слияния нет. Основной отчет сохранен как: {final_pdf_full_path}")
+            print(f"INFO: PDF вложений для слияния нет. Используется основной отчет для ознакомления.")
         else: 
-             print(f"INFO: PDF вложения не будут объединены (pypdf недоступен). Основной отчет: {final_pdf_full_path}")
+            print(f"INFO: PDF вложения не будут объединены (pypdf недоступен). Используется основной отчет для ознакомления.")
 
-        if specific_email_folder_created_successfully and num_attachments_found > 0 :
-             print(f"    INFO: Файлы вложений (оригиналы/конвертированные/PDF) находятся в: {email_att_specific_path}")
+        if not os.path.exists(path_for_review):
+            print(f"CRITICAL ERROR: Файл для просмотра '{path_for_review}' не существует перед вызовом handle_user_decision_for_pdf. Пропускаем.")
+            if path_for_review != temp_main_report_path and os.path.exists(temp_main_report_path):
+                try: os.remove(temp_main_report_path)
+                except: pass 
+            if temp_merged_path_for_cleanup and path_for_review != temp_merged_path_for_cleanup and os.path.exists(temp_merged_path_for_cleanup):
+                try: os.remove(temp_merged_path_for_cleanup)
+                except: pass
+            return "ERROR", None
+
+        # Передаем email_att_specific_path в handle_user_decision_for_pdf
+        # Если папка вложений не была создана (specific_email_folder_created_successfully is False),
+        # то email_att_specific_path может указывать на несуществующий путь,
+        # но handle_user_decision_for_pdf проверит os.path.exists перед удалением.
+        decision_status, final_file_path_after_decision = handle_user_decision_for_pdf(
+            path_for_review,
+            journal_number,
+            filename_date_str_for_display,
+            subject,
+            email_att_specific_path if specific_email_folder_created_successfully else None # Передаем путь, только если папка была создана/существовала
+        )
         
-        print(f"  DEBUG: Завершение open_email для ID {email_id} (вх.№ {journal_number}) успешно.")
-        return True 
+        # Выводим информацию о папке вложений только если она была создана и решение не "SKIPPED" (т.к. при SKIPPED она удаляется)
+        if specific_email_folder_created_successfully and num_attachments_found > 0 and decision_status != "SKIPPED":
+            print(f"    INFO: Файлы вложений (оригиналы/конвертированные/PDF) находятся в: {email_att_specific_path}")
+        
+        print(f"  DEBUG: Завершение open_email для ID {email_id} (вх.№ {journal_number}) со статусом: {decision_status}.")
+        return decision_status, final_file_path_after_decision
 
     except imaplib.IMAP4.error as e_imap: 
         print(f"  ERROR: Ошибка IMAP4 (письмо ID {email_id}, вх.№ {journal_number}): {e_imap}")
-        return False
+        return "ERROR", None
     except Exception as e_open_email:
         print(f"  ERROR: Критическая ошибка в open_email (письмо ID {email_id}, вх.№ {journal_number}): {e_open_email}")
         traceback.print_exc()
-        return False
+        # Попытка очистить временные файлы, если они были созданы
+        if 'temp_main_report_path' in locals() and os.path.exists(temp_main_report_path):
+            try: os.remove(temp_main_report_path)
+            except: pass
+        if 'temp_merged_path' in locals() and os.path.exists(temp_merged_path):
+            try: os.remove(temp_merged_path)
+            except: pass
+        return "ERROR", None
 
 if __name__ == "__main__":
     print("Запуск приложения для проверки почты...")
