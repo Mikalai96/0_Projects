@@ -19,7 +19,7 @@ import sys
 import platform 
 import subprocess 
 import time 
-import shutil # Добавлен для удаления непустых папок
+import shutil 
 
 def resource_path(relative_path):
     """ Получить абсолютный путь к ресурсу, работает для разработки и для PyInstaller """
@@ -52,10 +52,11 @@ else:
     print("INFO: Скрипт запущен не на Windows. Конвертация файлов MS Office в PDF будет недоступна.")
 
 DEJAVU_SANS_FONT_PATH = resource_path("DejaVuSans.ttf") 
-PDF_OUTPUT_DIRECTORY = "saved_emails_pdf"
-ATTACHMENTS_SUBDIRECTORY_NAME = "attachments"
-PDF_REGISTERED_SUBDIR_NAME = "registered_emails"
-PDF_DOWNLOADED_SUBDIR_NAME = "downloaded_emails"
+PDF_OUTPUT_DIRECTORY = "saved_emails_pdf" # Основная папка для всех создаваемых файлов и подпапок
+ATTACHMENTS_SUBDIRECTORY_NAME = "attachments" # Подпапка для вложений из писем
+PDF_REGISTERED_SUBDIR_NAME = "registered_emails" # Подпапка для зарегистрированных PDF (из писем и сканов)
+PDF_DOWNLOADED_SUBDIR_NAME = "downloaded_emails" # Подпапка для скачанных PDF из писем (без регистрации)
+SCANNED_INPUT_SUBDIR_NAME = "scanned_manual_input" # Подпапка для ручного размещения сканов
 
 CONVERTIBLE_EXTENSIONS = ['.doc','.docx','.rtf','.odt','.txt', '.xls','.xlsx','.ods', '.ppt','.pptx','.odp','.xlsm']
 
@@ -180,11 +181,9 @@ def handle_user_decision_for_pdf(path_for_review, journal_number, date_str_for_f
                 pdf_deleted = True
             except PermissionError as e_perm:
                 print(f"ERROR: Ошибка доступа при удалении PDF файла '{path_for_review}'. ВЕРОЯТНО, ФАЙЛ ВСЕ ЕЩЕ ОТКРЫТ В ПРОГРАММЕ ПРОСМОТРА PDF. Пожалуйста, ЗАКРОЙТЕ программу просмотра PDF и попробуйте снова. ({e_perm})")
-                # Остаемся в цикле, чтобы пользователь мог попробовать еще раз
                 continue 
             except Exception as e:
                 print(f"ERROR: Не удалось удалить PDF файл {path_for_review}: {e}")
-                # Если PDF не удален, нет смысла удалять вложения, возвращаем ошибку
                 return "ERROR", path_for_review 
             
             if pdf_deleted:
@@ -194,7 +193,6 @@ def handle_user_decision_for_pdf(path_for_review, journal_number, date_str_for_f
                         print(f"INFO: Папка вложений {attachments_folder_path} удалена.")
                     except Exception as e_rmtree:
                         print(f"WARNING: Не удалось удалить папку вложений {attachments_folder_path}: {e_rmtree}")
-                        # Продолжаем, так как основной PDF удален, но предупреждаем о папке
                 elif attachments_folder_path:
                      print(f"INFO: Папка вложений {attachments_folder_path} не найдена или уже удалена.")
                 else:
@@ -214,7 +212,7 @@ def prompt_for_starting_journal_number():
                 print("ERROR: Номер не может быть отрицательным.")
                 continue
             start_next_num = last_num + 1
-            print(f"INFO: Обработка писем в этой сессии начнется с вх.№ {start_next_num}.")
+            print(f"INFO: Обработка писем/сканов в этой сессии начнется с вх.№ {start_next_num}.") 
             return start_next_num
         except ValueError:
             print("ERROR: Пожалуйста, введите корректное число.")
@@ -308,34 +306,119 @@ def sanitize_filename(filename):
     if filename.startswith('.'): filename = "_" + filename
     return filename if filename else "sanitized_attachment"
 
+# --- Функция для обработки сканированных PDF ---
+def process_scanned_pdfs(starting_journal_num_from_email=-1):
+    """
+    Обрабатывает PDF-файлы, помещенные пользователем в специальную папку.
+    starting_journal_num_from_email: номер, с которого продолжать нумерацию после обработки почты.
+                                    Если -1, значит, нумерация почты не начиналась, и нужно запросить заново.
+    """
+    scanned_folder_path = os.path.join(PDF_OUTPUT_DIRECTORY, SCANNED_INPUT_SUBDIR_NAME)
+    registered_dir = os.path.join(PDF_OUTPUT_DIRECTORY, PDF_REGISTERED_SUBDIR_NAME)
+
+    try:
+        if not os.path.exists(scanned_folder_path):
+            os.makedirs(scanned_folder_path)
+            print(f"INFO: Создана папка для сканированных файлов: {scanned_folder_path}")
+    except OSError as e:
+        print(f"CRITICAL ERROR: Не удалось создать папку для сканированных файлов '{scanned_folder_path}': {e}. Работа прервана.")
+        return
+
+    print(f"\nПожалуйста, поместите отсканированные PDF-файлы в папку: \n{os.path.abspath(scanned_folder_path)}")
+    input("После размещения файлов, нажмите Enter для продолжения...")
+
+    try:
+        pdf_files = [f for f in os.listdir(scanned_folder_path) if f.lower().endswith('.pdf')]
+    except Exception as e:
+        print(f"ERROR: Не удалось прочитать содержимое папки '{scanned_folder_path}': {e}")
+        return
+
+    if not pdf_files:
+        print(f"INFO: Папка '{scanned_folder_path}' пуста или не содержит PDF-файлов. Завершение обработки сканов.")
+        return
+
+    print(f"INFO: Найдено {len(pdf_files)} PDF-файлов для регистрации.")
+    pdf_files.sort() 
+
+    current_journal_num_for_scans = -1
+    if starting_journal_num_from_email != -1:
+        current_journal_num_for_scans = starting_journal_num_from_email
+        print(f"INFO: Продолжение нумерации с вх.№ {current_journal_num_for_scans} (после обработки почты).")
+    else:
+        # Если нумерация почты не начиналась (например, не было писем или ошибка до нумерации),
+        # или если check_mailru_inbox вернула -1 по другой причине, запрашиваем заново.
+        print("INFO: Нумерация почты не была начата или не было обработано писем с присвоением номера.")
+        current_journal_num_for_scans = prompt_for_starting_journal_number()
+    
+    date_str_for_filename = datetime.datetime.now().strftime("%d.%m.%Y")
+
+    try:
+        if not os.path.exists(registered_dir):
+            os.makedirs(registered_dir)
+            print(f"INFO: Создана папка для зарегистрированных файлов: {registered_dir}")
+    except OSError as e:
+        print(f"CRITICAL ERROR: Не удалось создать папку для зарегистрированных файлов '{registered_dir}': {e}. Работа прервана.")
+        return
+    
+    processed_count = 0
+    for original_filename in pdf_files:
+        new_filename = f"вх.№ {current_journal_num_for_scans} от {date_str_for_filename}.pdf"
+        old_filepath = os.path.join(scanned_folder_path, original_filename)
+        new_filepath = os.path.join(registered_dir, new_filename)
+
+        try:
+            if os.path.exists(new_filepath):
+                print(f"WARNING: Файл с именем '{new_filename}' уже существует в '{registered_dir}'. Будет перезаписан.")
+                if os.path.abspath(old_filepath) != os.path.abspath(new_filepath):
+                   try:
+                       os.remove(new_filepath)
+                   except Exception as e_del_exist:
+                       print(f"  WARNING: Не удалось удалить существующий файл '{new_filepath}' перед переименованием: {e_del_exist}")
+
+            shutil.move(old_filepath, new_filepath) 
+            print(f"INFO: Файл '{original_filename}' зарегистрирован и перемещен как '{new_filename}' в '{registered_dir}'")
+            current_journal_num_for_scans += 1
+            processed_count +=1
+        except Exception as e:
+            print(f"ERROR: Не удалось зарегистрировать файл '{original_filename}': {e}")
+            traceback.print_exc()
+    
+    print(f"\nINFO: Завершена регистрация отсканированных файлов. Обработано: {processed_count} из {len(pdf_files)}.")
+
+
 def check_mailru_inbox():
+    """
+    Проверяет почту, обрабатывает письма.
+    Возвращает последний использованный номер журнала (или -1, если нумерация не начиналась).
+    """
     load_dotenv()
     mail_host = os.getenv('IMAP_SERVER'); username = os.getenv('MAIL_RU_EMAIL'); password = os.getenv('MAIL_RU_PASSWORD')
-    if not all([mail_host, username, password]): print("Ошибка: Не все переменные окружения определены."); return
+    
+    # Инициализируем current_journal_num значением, указывающим, что нумерация не начиналась
+    current_journal_num = -1 
+    
+    if not all([mail_host, username, password]): 
+        print("Ошибка: Не все переменные окружения для почты определены. Пропуск обработки почты.")
+        return current_journal_num 
     
     mail = None
-    current_journal_num = -1 
+    # emails_processed_successfully = False # Эта переменная больше не нужна для возврата
 
     try:
         print(f"Подключение к {mail_host}..."); mail = imaplib.IMAP4_SSL(mail_host, 993)
         print("Вход в аккаунт..."); mail.login(username, password)
         mail.select('inbox'); print("Успешно подключено к 'Входящие'.")
         
-        if not os.path.exists(PDF_OUTPUT_DIRECTORY):
-            try:
-                os.makedirs(PDF_OUTPUT_DIRECTORY)
-                print(f"INFO: Папка '{PDF_OUTPUT_DIRECTORY}' создана.")
-            except OSError as e:
-                print(f"CRITICAL ERROR: Не удалось создать основную папку вывода '{PDF_OUTPUT_DIRECTORY}': {e}. Работа прервана.")
-                return
-
         print("Поиск непрочитанных писем..."); status, data = mail.search(None, 'UNSEEN')
-        if status != 'OK': print(f"Ошибка поиска писем: {data[0].decode() if data and data[0] else 'Нет данных'}"); return
+        if status != 'OK': 
+            print(f"Ошибка поиска писем: {data[0].decode() if data and data[0] else 'Нет данных'}")
+            return current_journal_num # Возвращаем -1, так как нумерация не могла начаться
         
         email_ids_bytes = data[0].split(); num_unread = len(email_ids_bytes)
         print(f"У вас {num_unread} непрочитанных писем.")
 
         if num_unread > 0:
+            # Запрашиваем номер только если есть письма
             current_journal_num = prompt_for_starting_journal_number() 
 
             for i, email_id_bytes in enumerate(email_ids_bytes):
@@ -347,14 +430,18 @@ def check_mailru_inbox():
                 if processing_result == "SAVED":
                     print(f"INFO: Письмо ID {email_id_str} успешно обработано и сохранено с вх.№ {current_journal_num}.")
                     current_journal_num += 1 
+                    # emails_processed_successfully = True # Больше не используется для возврата
                 elif processing_result == "DOWNLOADED":
                     print(f"INFO: Письмо ID {email_id_str} скачано без присвоения номера журнала.")
+                    # emails_processed_successfully = True
                 elif processing_result == "SKIPPED":
                     print(f"INFO: Письмо ID {email_id_str} (предполагаемый вх.№ {current_journal_num}) пропущено пользователем (PDF и вложения удалены).")
+                    # emails_processed_successfully = True
                 else: 
                     print(f"ERROR: Ошибка обработки письма ID {email_id_str} (предполагаемый вх.№ {current_journal_num}). Этот номер будет использован для следующего письма (если оно есть и будет обработано успешно).")
         else:
             print("У вас нет непрочитанных писем.")
+            # emails_processed_successfully = True
             
     except imaplib.IMAP4.error as e: print(f"Ошибка IMAP4: {e}")
     except ConnectionRefusedError: print(f"Ошибка подключения к {mail_host}.")
@@ -364,10 +451,13 @@ def check_mailru_inbox():
             try: print("Выход из почтового сервера..."); mail.logout()
             except Exception as e_logout: print(f"Ошибка при выходе: {e_logout}")
         print("Завершение работы с почтовым сервером.")
+    
+    return current_journal_num # Возвращаем последнее значение номера
+
 
 def open_email(mail_obj, email_id, journal_number):
     pdf_attachments_to_merge = []
-    email_att_specific_path = None # Инициализируем путь к папке вложений
+    email_att_specific_path = None 
     
     try:
         print(f"  DEBUG: Начало open_email для ID {email_id}, вх.№ {journal_number}")
@@ -489,7 +579,6 @@ def open_email(mail_obj, email_id, journal_number):
         attachments_summary = []; num_attachments_found = 0
         email_att_path_base = os.path.join(PDF_OUTPUT_DIRECTORY, ATTACHMENTS_SUBDIRECTORY_NAME)
         sanitized_email_att_subdir_name = sanitize_filename(raw_email_att_dir_name)
-        # Определяем путь к папке вложений для этого письма
         email_att_specific_path = os.path.join(email_att_path_base, sanitized_email_att_subdir_name)
 
         if not os.path.exists(email_att_path_base):
@@ -497,12 +586,10 @@ def open_email(mail_obj, email_id, journal_number):
             except OSError as e_base_dir: print(f"    ERROR: Ошибка создания базовой папки вложений '{email_att_path_base}': {e_base_dir}")
         
         specific_email_folder_created_successfully = False
-        # Создаем папку вложений, если есть что сохранять (будет проверено ниже)
-        # Флаг specific_email_folder_created_successfully будет установлен, если папка создана или уже существует
         
         if msg.is_multipart():
             has_attachments_to_save_to_disk = False
-            for part_check in msg.walk(): # Предварительная проверка, есть ли вообще вложения для сохранения на диск
+            for part_check in msg.walk(): 
                 filename_header_check = part_check.get_filename()
                 cdisp_check = str(part_check.get("Content-Disposition"))
                 if filename_header_check or "attachment" in cdisp_check.lower():
@@ -513,7 +600,7 @@ def open_email(mail_obj, email_id, journal_number):
                         has_attachments_to_save_to_disk = True
                         break
             
-            if has_attachments_to_save_to_disk: # Создаем папку только если есть что в нее класть
+            if has_attachments_to_save_to_disk: 
                 if not os.path.exists(email_att_specific_path):
                     try: 
                         os.makedirs(email_att_specific_path)
@@ -521,9 +608,8 @@ def open_email(mail_obj, email_id, journal_number):
                         print(f"    INFO: Создана папка для вложений письма: {email_att_specific_path}")
                     except OSError as e_mkdir: 
                         print(f"      ERROR: Не удалось создать папку '{email_att_specific_path}': {e_mkdir}.")
-                        # specific_email_folder_created_successfully остается False
                 else: 
-                    specific_email_folder_created_successfully = True # Папка уже существует
+                    specific_email_folder_created_successfully = True 
 
             print(f"    DEBUG: Начало обработки вложений (всего частей в письме: {len(list(msg.walk()))}).")
             for part_counter, part in enumerate(msg.walk()):
@@ -576,7 +662,7 @@ def open_email(mail_obj, email_id, journal_number):
                         att_info_line += " - HTML (как текст) добавлен в PDF."
                         print(f"      INFO: HTML из '{decoded_fn}' (как текст) добавлен в PDF.")
                     else: 
-                        if not specific_email_folder_created_successfully: # Проверяем, была ли папка успешно создана/доступна
+                        if not specific_email_folder_created_successfully: 
                             att_info_line += " - не обработано (ошибка создания папки вложений письма)."
                             print(f"      WARNING: Пропуск сохранения файла '{decoded_fn}' из-за ошибки папки вложений письма.")
                             current_y = add_paragraph_pdf(f"<i>Файл '{decoded_fn}' не сохранен на диск (ошибка папки).</i>", styleN, current_y)
@@ -602,7 +688,6 @@ def open_email(mail_obj, email_id, journal_number):
                                     final_pdf_name_att = f"{part_counter}_{sanitized_fn_for_saving}" 
                                     final_pdf_path_abs_att = os.path.abspath(os.path.join(email_att_specific_path, final_pdf_name_att))
                                     try:
-                                        # Если файл уже существует и это не тот же самый файл, удаляем старый
                                         if os.path.exists(final_pdf_path_abs_att) and final_pdf_path_abs_att != orig_path_abs:
                                             os.remove(final_pdf_path_abs_att)
                                         os.rename(orig_path_abs, final_pdf_path_abs_att)
@@ -699,19 +784,14 @@ def open_email(mail_obj, email_id, journal_number):
                 except: pass
             return "ERROR", None
 
-        # Передаем email_att_specific_path в handle_user_decision_for_pdf
-        # Если папка вложений не была создана (specific_email_folder_created_successfully is False),
-        # то email_att_specific_path может указывать на несуществующий путь,
-        # но handle_user_decision_for_pdf проверит os.path.exists перед удалением.
         decision_status, final_file_path_after_decision = handle_user_decision_for_pdf(
             path_for_review,
             journal_number,
             filename_date_str_for_display,
             subject,
-            email_att_specific_path if specific_email_folder_created_successfully else None # Передаем путь, только если папка была создана/существовала
+            email_att_specific_path if specific_email_folder_created_successfully else None 
         )
         
-        # Выводим информацию о папке вложений только если она была создана и решение не "SKIPPED" (т.к. при SKIPPED она удаляется)
         if specific_email_folder_created_successfully and num_attachments_found > 0 and decision_status != "SKIPPED":
             print(f"    INFO: Файлы вложений (оригиналы/конвертированные/PDF) находятся в: {email_att_specific_path}")
         
@@ -724,15 +804,28 @@ def open_email(mail_obj, email_id, journal_number):
     except Exception as e_open_email:
         print(f"  ERROR: Критическая ошибка в open_email (письмо ID {email_id}, вх.№ {journal_number}): {e_open_email}")
         traceback.print_exc()
-        # Попытка очистить временные файлы, если они были созданы
         if 'temp_main_report_path' in locals() and os.path.exists(temp_main_report_path):
             try: os.remove(temp_main_report_path)
             except: pass
-        if 'temp_merged_path' in locals() and os.path.exists(temp_merged_path):
-            try: os.remove(temp_merged_path)
+        if 'temp_merged_path' in locals() and 'temp_merged_path_for_cleanup' in locals() and \
+           temp_merged_path_for_cleanup and os.path.exists(temp_merged_path_for_cleanup) : 
+            try: os.remove(temp_merged_path_for_cleanup)
             except: pass
         return "ERROR", None
 
 if __name__ == "__main__":
-    print("Запуск приложения для проверки почты...")
-    check_mailru_inbox()
+    if not os.path.exists(PDF_OUTPUT_DIRECTORY):
+        try:
+            os.makedirs(PDF_OUTPUT_DIRECTORY)
+            print(f"INFO: Основная папка вывода '{PDF_OUTPUT_DIRECTORY}' создана.")
+        except OSError as e:
+            print(f"CRITICAL ERROR: Не удалось создать основную папку вывода '{PDF_OUTPUT_DIRECTORY}': {e}. Работа прервана.")
+            sys.exit(1) 
+
+    print("\n--- Этап 1: Обработка электронной почты ---")
+    last_used_journal_num = check_mailru_inbox() # Сначала обрабатываем почту и получаем последний номер
+    
+    print("\n--- Этап 2: Регистрация отсканированных PDF-файлов ---")
+    process_scanned_pdfs(last_used_journal_num) # Затем обрабатываем сканы, передавая номер
+    
+    print("\nЗавершение работы приложения.")
